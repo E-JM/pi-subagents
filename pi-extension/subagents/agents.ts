@@ -1,8 +1,7 @@
-// Agent definition domain: frontmatter parsing, discovery, and defaults.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { SUBAGENTS_DIR } from "./util.ts";
+import { SUBAGENTS_DIR } from "./files.ts";
 
 export type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
 
@@ -13,13 +12,7 @@ export interface AgentDefaults {
   thinking?: string;
   denyTools?: string;
   spawning?: boolean;
-  /**
-   * Frontmatter escape hatch for user-driven agents (no `spawning: false`,
-   * e.g. planner): keep the pane open for the user to drive directly.
-   * Autonomous agents (`spawning: false`) must NOT declare it — turn-end
-   * auto-exit is their core protocol, and an `interactive: true` nobody
-   * watches just dead-locks. Enforced at spawn time by resolveInteractive.
-   */
+  /** Keep the pane open for the user. Invalid on `spawning: false` agents. */
   interactive?: boolean;
   systemPromptMode?: "append" | "replace";
   sessionMode?: SubagentSessionMode;
@@ -31,28 +24,24 @@ export interface AgentDefaults {
 
 export type AgentSource = "package" | "global" | "project";
 
-export interface AgentDefinition extends AgentDefaults {
+interface AgentDefinition extends AgentDefaults {
   name: string;
   description?: string;
   disableModelInvocation: boolean;
 }
 
-export interface ListedAgentDefinition extends AgentDefinition {
+interface ListedAgentDefinition extends AgentDefinition {
   source: AgentSource;
 }
 
-/** Tools that are gated by `spawning: false` */
 const SPAWNING_TOOLS = new Set([
   "subagent_spawn",
   "subagent_message",
   "subagent_close",
 ]);
 
-/**
- * Resolve the effective set of denied tool names from agent defaults.
- * `spawning: false` expands to all SPAWNING_TOOLS.
- * `deny-tools` adds individual tool names on top.
- */
+/** Denied tool names: `spawning: false` expands to SPAWNING_TOOLS, then
+ * `deny-tools` adds names on top. */
 export function resolveDenyTools(agentDefs: AgentDefaults | null): Set<string> {
   const denied = new Set<string>();
   if (!agentDefs) return denied;
@@ -74,11 +63,8 @@ export function resolveDenyTools(agentDefs: AgentDefaults | null): Set<string> {
 }
 
 /**
- * Resolve the effective interactive flag with the frontmatter contract
- * enforced: `interactive: true` is the escape hatch for user-driven agents
- * (planner). Autonomous agents (`spawning: false`) auto-exit when their turn
- * ends — an `interactive: true` nobody watches would dead-lock forever, so
- * declaring one is a configuration error, not a silent footnote.
+ * Interactive flag, enforcing the frontmatter contract: autonomous agents
+ * auto-exit at turn end, so `interactive: true` is a config error for them.
  */
 export function resolveInteractive(params: {
   agentName?: string;
@@ -95,7 +81,6 @@ export function resolveInteractive(params: {
   return interactive;
 }
 
-/** Resolve the global agent config directory, respecting PI_CODING_AGENT_DIR. */
 export function getAgentConfigDir(): string {
   return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 }
@@ -109,13 +94,12 @@ function getFrontmatterValue(
   key: string,
 ): string | undefined {
   const match = frontmatter.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
-  return match ? match[1].trim() : undefined;
+  return match?.[1]?.trim();
 }
 
 function parseOptionalBoolean(value: string | undefined): boolean | undefined {
   if (value == null) return undefined;
-  // First token only: a trailing YAML comment (`spawning: false # note`)
-  // must not fail the security-relevant parse open.
+  // First token only, so `spawning: false # note` still parses safely.
   return value.trim().split(/\s+/)[0] === "true";
 }
 
@@ -136,7 +120,7 @@ export function parseAgentDefinition(
   const match = content.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return null;
 
-  const frontmatter = match[1];
+  const frontmatter = match[1] ?? "";
   const body = content.replace(/^---\n[\s\S]*?\n---\n*/, "").trim();
   const systemPromptMode = getFrontmatterValue(frontmatter, "system-prompt");
 
@@ -186,7 +170,6 @@ export function discoverAgentDefinitions(): ListedAgentDefinition[] {
 
   for (const { path: dir, source } of dirs) {
     if (!existsSync(dir)) continue;
-    // Sorted so duplicate frontmatter names shadow deterministically.
     for (const file of readdirSync(dir)
       .filter((entry) => entry.endsWith(".md"))
       .sort()) {
@@ -202,11 +185,10 @@ export function discoverAgentDefinitions(): ListedAgentDefinition[] {
   return [...agents.values()];
 }
 
+/** Agent names become `<name>.md` paths: reject traversal and absolute paths. */
 const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export function loadAgentDefaults(agentName: string): AgentDefaults | null {
-  // Agent names become file paths (`<name>.md`) — reject traversal and
-  // absolute-path injection instead of joining them.
   if (!AGENT_NAME_PATTERN.test(agentName)) return null;
   const configDir = getAgentConfigDir();
   const paths = [

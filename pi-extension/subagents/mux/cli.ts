@@ -1,12 +1,15 @@
-// Small shared helpers for the mux backends.
-
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 export const execFileAsync = promisify(execFile);
 
-export function shellEscape(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
+/** Parse mux CLI JSON output; null on garbage instead of a throw at every call site. */
+export function parseCliJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 export function tailLines(text: string, lines: number): string {

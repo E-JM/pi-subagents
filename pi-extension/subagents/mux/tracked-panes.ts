@@ -1,7 +1,5 @@
-/**
- * Pane-id tracking shared by herdr and tmux: globalThis + Symbol.for so the
- * list survives /reload; ids stay in spawn order (grid fill order).
- */
+/** Pane-id tracking for herdr and tmux: globalThis + Symbol.for survives
+ * /reload; ids stay in spawn order (grid fill order). */
 export function createTrackedPaneList(key: symbol) {
   const paneList = (): string[] => {
     const store = globalThis as Record<symbol, unknown>;

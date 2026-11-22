@@ -131,7 +131,6 @@ for (const backend of backends) {
       await sleep(1000);
 
       const marker = uniqueId();
-      // Single-quoted string — $ and " are literal inside single quotes
       sendCommand(surface, `echo 'SPEC_${marker}_$HOME_"quotes"_done'`);
       await sleep(1500);
 
@@ -140,7 +139,6 @@ for (const backend of backends) {
         screen.includes(`SPEC_${marker}`),
         `Expected special-char output. Got:\n${screen}`,
       );
-      // $ should be literal inside single quotes
       assert.ok(
         screen.includes("$HOME"),
         `Expected literal $HOME in output. Got:\n${screen}`,
@@ -231,7 +229,6 @@ for (const backend of backends) {
         `File content wrong. Got: ${content}`,
       );
 
-      // Clean up
       try {
         unlinkSync(filePath);
       } catch {}

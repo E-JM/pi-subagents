@@ -88,24 +88,21 @@ for (const backend of backends) {
 
       startPi(surface, env.dir, task);
 
-      // Verify: subagent created the marker file
       const content = await waitForFile(markerFile, PI_TIMEOUT, /PASS/);
       assert.ok(
         content.includes(`PASS_${id}`),
         `Marker file should contain PASS_${id}. Got: ${content.trim()}`,
       );
 
-      // Verify: outer pi received the subagent result
       const screen = await waitForScreen(
         surface,
         /INTEGRATION_COMPLETE|completed|Sub-agent.*"Echo/i,
         PI_TIMEOUT,
       );
 
-      // Verify: session file was created (shown in steer result)
       const sessionMatch = screen.match(/Session:\s*(\S+\.jsonl)/);
       if (sessionMatch) {
-        const sessionFile = sessionMatch[1];
+        const sessionFile = sessionMatch[1]!;
         assert.ok(
           existsSync(sessionFile),
           `Subagent session file should exist: ${sessionFile}`,
@@ -117,13 +114,45 @@ for (const backend of backends) {
           `Session should have ≥2 entries, got ${lines.length}`,
         );
 
-        const header = JSON.parse(lines[0]);
+        const header = JSON.parse(lines[0]!);
         assert.equal(
           header.type,
           "session",
           "First entry should be session header",
         );
         assert.ok(header.id, "Session header should have an id");
+
+        // Delivery contract: the child's first user message is the plain
+        // task text — not a `<file name="…">` artifact attachment pointing
+        // into the parent's session artifacts.
+        const firstUser = lines
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                type: string;
+                message?: { role?: string; content?: { text?: string }[] };
+              },
+          )
+          .find(
+            (entry) =>
+              entry.type === "message" && entry.message?.role === "user",
+          );
+        assert.ok(firstUser, "Child session should have a user message");
+        const firstText = (firstUser.message?.content ?? [])
+          .map((block) => block.text ?? "")
+          .join("");
+        assert.ok(
+          !firstText.includes("<file name="),
+          "Child's first message must be plain task text, not a file attachment",
+        );
+        assert.ok(
+          !firstText.includes("Ending your turn"),
+          "Lifecycle contract must travel in the system prompt, not the first message",
+        );
+        assert.ok(
+          firstText.includes(`PASS_${id}`),
+          "Child's first message should contain the task text",
+        );
       }
     });
 
@@ -224,7 +253,6 @@ for (const backend of backends) {
 
       startPi(surface, env.dir, task);
 
-      // Both marker files should appear
       const [contentA, contentB] = await Promise.all([
         waitForFile(fileA, PI_TIMEOUT, /DONE_A/),
         waitForFile(fileB, PI_TIMEOUT, /DONE_B/),
@@ -261,24 +289,21 @@ for (const backend of backends) {
 
       startPi(surface, env.dir, task);
 
-      // Verify: forked subagent created the file
       const content = await waitForFile(markerFile, PI_TIMEOUT, /FORK_OK/);
       assert.ok(
         content.includes(`FORK_OK_${id}`),
         `Fork marker file should exist with content`,
       );
 
-      // Wait for the outer pi to show the result
       const screen = await waitForScreen(
         surface,
         /FORK_COMPLETE|completed|Sub-agent.*"Fork/i,
         PI_TIMEOUT,
       );
 
-      // Verify: the forked session has a parent link
       const sessionMatch = screen.match(/Session:\s*(\S+\.jsonl)/);
       if (sessionMatch) {
-        const sessionFile = sessionMatch[1];
+        const sessionFile = sessionMatch[1]!;
         assert.ok(
           existsSync(sessionFile),
           `Fork session file should exist: ${sessionFile}`,
@@ -298,7 +323,6 @@ for (const backend of backends) {
           header.parentSession,
           "Fork session should have parentSession field",
         );
-        // Fork sessions include parent context (model_change entries etc.)
         assert.ok(
           entries.length >= 2,
           "Fork session should have context entries beyond header",

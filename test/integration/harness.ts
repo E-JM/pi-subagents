@@ -1,13 +1,4 @@
-/**
- * Integration test harness for pi-interactive-subagents.
- *
- * Provides utilities to:
- * - Detect available mux backends (cmux, tmux, zellij, wezterm, herdr)
- * - Create isolated test environments with test agent definitions
- * - Start real pi sessions in mux surfaces
- * - Poll for file creation and screen output
- * - Clean up surfaces and temp files after tests
- */
+// Integration harness: detect mux backends, build envs, drive real pi sessions.
 import { execFileSync } from "node:child_process";
 import {
   cpSync,
@@ -27,17 +18,20 @@ import {
   closeSurface,
   createSurface,
   createSurfaceSplit,
-  getMuxBackend,
-  type MuxBackend,
-  parseCmuxFocusedSnapshotFromJson,
-  parseCmuxPaneRefForSurfaceFromJson,
   readScreen,
   readScreenAsync,
   sendLongCommand,
-  shellEscape,
-} from "../../pi-extension/subagents/cmux.ts";
+} from "../../pi-extension/subagents/mux/api.ts";
+import {
+  getMuxBackend,
+  type MuxBackend,
+} from "../../pi-extension/subagents/mux/backend.ts";
+import {
+  parseCmuxFocusedSnapshotFromJson,
+  parseCmuxPaneRefForSurfaceFromJson,
+} from "../../pi-extension/subagents/mux/cmux-backend.ts";
+import { shellEscape } from "../../pi-extension/subagents/shell.ts";
 
-// Re-export mux primitives for tests (single source of truth: cmux.ts).
 export {
   closeSurface,
   createSurface,
@@ -47,27 +41,16 @@ export {
   sendCommand,
   sendEscape,
   sendLongCommand,
-  shellEscape,
-} from "../../pi-extension/subagents/cmux.ts";
+} from "../../pi-extension/subagents/mux/api.ts";
+export { shellEscape } from "../../pi-extension/subagents/shell.ts";
 export type { MuxBackend };
-
-// ── Paths ──
 
 const HARNESS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(HARNESS_DIR, "../..");
 const TEST_AGENTS_SRC = join(HARNESS_DIR, "agents");
 
-/**
- * Absolute path to the extension source in the working tree.
- *
- * Integration tests must exercise the code on the current branch — NOT the
- * version installed as a pi-package under `~/.pi/agent/git/...` or the project
- * mirror under `.pi/git/...`, which stays pinned to the last released tag.
- *
- * We force-load this file via `pi -ne -e <path>` in startPi() below so local
- * edits are always the code under test, regardless of what pi-packages are
- * installed on the host.
- */
+// Force-loaded via `pi -ne -e` so tests exercise the working tree, never an
+// installed pi-package pinned to the last release.
 const EXTENSION_SOURCE = join(
   PROJECT_ROOT,
   "pi-extension",
@@ -75,25 +58,16 @@ const EXTENSION_SOURCE = join(
   "index.ts",
 );
 
-// ── Configuration ──
-
-/** Model used for integration tests. Override with PI_TEST_MODEL env var. */
 export const TEST_MODEL =
   process.env.PI_TEST_MODEL ?? "anthropic/claude-haiku-4-5";
 
-/** Per-test timeout in ms. Override with PI_TEST_TIMEOUT env var. */
 export const PI_TIMEOUT = Number(process.env.PI_TEST_TIMEOUT ?? "120000");
 
-// ── Polling cadence ──
-
-/** Fast poll for quick-changing local state (e.g. focus transitions). */
 const POLL_INTERVAL_FAST_MS = 200;
-/** Slow poll for subprocess output — mux screen reads are expensive. */
+/** Screen reads are expensive, so subprocess output polls slowly. */
 const POLL_INTERVAL_SLOW_MS = 2000;
 
-// ── Backend detection ──
-
-/** All supported backends — keep in sync with cmux.ts's MuxBackend union. */
+/** Keep in sync with mux/backend.ts's MuxBackend union. */
 const ALL_BACKENDS: MuxBackend[] = [
   "cmux",
   "tmux",
@@ -102,10 +76,6 @@ const ALL_BACKENDS: MuxBackend[] = [
   "herdr",
 ];
 
-/**
- * Detect which mux backends are actually available in the current environment.
- * Temporarily sets PI_SUBAGENT_MUX to probe each backend.
- */
 export function getAvailableBackends(): MuxBackend[] {
   const backends: MuxBackend[] = [];
   const orig = process.env.PI_SUBAGENT_MUX;
@@ -231,24 +201,14 @@ export async function waitForFocusedSurface(
   );
 }
 
-// ── Test environment ──
-
 export interface TestEnv {
-  /** Temp directory serving as the test project root */
   dir: string;
-  /** Active mux backend for this test run */
   backend: MuxBackend;
-  /** Surfaces created during the test (cleaned up automatically) */
   surfaces: string[];
-  /** Temp files to clean up */
   tempFiles: string[];
 }
 
-/**
- * Copy test agent definitions into the project-local agents dir.
- * When PI_TEST_MODEL is set, rewrite each agent's `model:` frontmatter so
- * child subagents run on the same (available) model as the parent session.
- */
+/** PI_TEST_MODEL rewrites each test agent's `model:` frontmatter. */
 function copyTestAgents(agentsDir: string): void {
   if (!existsSync(TEST_AGENTS_SRC)) return;
   for (const file of readdirSync(TEST_AGENTS_SRC)) {
@@ -268,10 +228,6 @@ function copyTestAgents(agentsDir: string): void {
   }
 }
 
-/**
- * Create an isolated test environment with test agent definitions.
- * The temp dir has `.pi/agents/` containing copies of all test agents.
- */
 export function createTestEnv(backend: MuxBackend): TestEnv {
   const dir = mkdtempSync(join(tmpdir(), "pi-integ-"));
   const agentsDir = join(dir, ".pi", "agents");
@@ -282,9 +238,6 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
   return { dir, backend, surfaces: [], tempFiles: [] };
 }
 
-/**
- * Clean up all resources created during the test.
- */
 export function cleanupTestEnv(env: TestEnv): void {
   for (const surface of env.surfaces) {
     try {
@@ -301,9 +254,6 @@ export function cleanupTestEnv(env: TestEnv): void {
   } catch {}
 }
 
-/**
- * Create a surface and register it for automatic cleanup.
- */
 export function createTrackedSurface(env: TestEnv, name: string): string {
   const surface = createSurface(name);
   env.surfaces.push(surface);
@@ -321,19 +271,10 @@ export function createTrackedSurfaceSplit(
   return surface;
 }
 
-/**
- * Remove a surface from tracking (after manual close).
- */
 export function untrackSurface(env: TestEnv, surface: string): void {
   env.surfaces = env.surfaces.filter((s) => s !== surface);
 }
 
-// ── Pi session management ──
-
-/**
- * Start a pi session in a mux surface with the subagents extension loaded.
- * Returns immediately — the pi process runs asynchronously in the surface.
- */
 export function startPi(
   surface: string,
   testDir: string,
@@ -343,11 +284,9 @@ export function startPi(
   const model = opts?.model ?? TEST_MODEL;
   const extra = opts?.extraArgs ?? "";
 
-  // herdr's `pane read` cannot see alt-screen transcript content of fullscreen
-  // background panes, so screen-based assertions need regular mode there.
+  // herdr cannot read alt-screen background panes; use regular TUI mode there.
   const tuiMode = getMuxBackend() === "herdr" ? "--tui-mode regular" : "";
 
-  // Force-load the working-tree extension (see EXTENSION_SOURCE above).
   const cmd = [
     `cd ${shellEscape(testDir)} &&`,
     `pi`,
@@ -366,12 +305,6 @@ export function startPi(
   });
 }
 
-// ── Polling helpers ──
-
-/**
- * Poll until a regex pattern appears in the surface's screen output.
- * Throws on timeout with the last screen contents for debugging.
- */
 export async function waitForScreen(
   surface: string,
   pattern: RegExp,
@@ -396,10 +329,6 @@ export async function waitForScreen(
   );
 }
 
-/**
- * Poll until a file exists and optionally matches a content pattern.
- * Returns the file content on success.
- */
 export async function waitForFile(
   path: string,
   timeout: number = PI_TIMEOUT,
@@ -419,8 +348,6 @@ export async function waitForFile(
   );
 }
 
-// ── Utilities ──
-
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -429,9 +356,6 @@ export function uniqueId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
-/**
- * Register a temp file for cleanup.
- */
 export function trackTempFile(env: TestEnv, path: string): void {
   env.tempFiles.push(path);
 }

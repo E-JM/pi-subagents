@@ -1,8 +1,8 @@
 // Subagent layout mode (columns vs tiled grid, herdr/tmux only).
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getAgentConfigDir } from "../agents.ts";
 
 export type SubagentLayoutMode = "columns" | "tiled";
 
@@ -13,14 +13,10 @@ function parseLayoutMode(value: unknown): SubagentLayoutMode | null {
   return value === "columns" || value === "tiled" ? value : null;
 }
 
-function agentConfigDirForLayout(): string {
-  return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-}
-
 function readPersistedLayoutMode(): SubagentLayoutMode | null {
   try {
     const raw = JSON.parse(
-      readFileSync(join(agentConfigDirForLayout(), LAYOUT_MODE_FILE), "utf8"),
+      readFileSync(join(getAgentConfigDir(), LAYOUT_MODE_FILE), "utf8"),
     );
     return parseLayoutMode(raw?.mode);
   } catch {
@@ -29,9 +25,8 @@ function readPersistedLayoutMode(): SubagentLayoutMode | null {
 }
 
 /**
- * Resolve the active subagent pane layout for herdr/tmux. Precedence: the
- * choice persisted by /subagent-layout, then PI_SUBAGENT_LAYOUT, then
- * "columns". Cached on globalThis so it survives /reload.
+ * Layout mode for herdr/tmux: the /subagent-layout choice, then
+ * PI_SUBAGENT_LAYOUT, then "columns". Cached on globalThis through /reload.
  */
 export function getSubagentLayoutMode(): SubagentLayoutMode {
   const store = globalThis as Record<symbol, unknown>;
@@ -49,9 +44,9 @@ export function getSubagentLayoutMode(): SubagentLayoutMode {
 export function setSubagentLayoutMode(mode: SubagentLayoutMode): void {
   (globalThis as Record<symbol, unknown>)[LAYOUT_MODE_KEY] = mode;
   try {
-    mkdirSync(agentConfigDirForLayout(), { recursive: true });
+    mkdirSync(getAgentConfigDir(), { recursive: true });
     writeFileSync(
-      join(agentConfigDirForLayout(), LAYOUT_MODE_FILE),
+      join(getAgentConfigDir(), LAYOUT_MODE_FILE),
       `${JSON.stringify({ mode }, null, 2)}\n`,
     );
   } catch {

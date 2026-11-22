@@ -1,10 +1,8 @@
-// Zellij backend: placement planning, surface creation, and pane ops.
-
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { envPositiveInteger, sleepSync } from "./util.ts";
+import { envPositiveInteger, sleepSync } from "./cli.ts";
 
 function zellijPaneId(surface: string): string {
   return surface.startsWith("pane:") ? surface.slice("pane:".length) : surface;
@@ -18,11 +16,7 @@ export function zellijEnv(surface?: string): NodeJS.ProcessEnv {
   return env;
 }
 
-/**
- * Pane-scoped zellij actions that must target a specific pane via --pane-id
- * (the ZELLIJ_PANE_ID env var is ignored by most of these).
- * See https://github.com/HazAT/pi-interactive-subagents/issues/19
- */
+/** Actions that need an explicit --pane-id; ZELLIJ_PANE_ID is ignored here. */
 const ZELLIJ_PANE_SCOPED_ACTIONS = new Set([
   "close-pane",
   "dump-screen",
@@ -34,9 +28,8 @@ const ZELLIJ_PANE_SCOPED_ACTIONS = new Set([
 
 export function zellijActionArgs(args: string[], surface?: string): string[] {
   if (!surface) return ["action", ...args];
-  const action = args[0];
+  const [action = ""] = args;
   if (!ZELLIJ_PANE_SCOPED_ACTIONS.has(action)) return ["action", ...args];
-  // Don't double-add if caller already specified it.
   if (args.includes("--pane-id") || args.includes("-p"))
     return ["action", ...args];
   return [
@@ -55,18 +48,17 @@ function zellijActionSync(args: string[], surface?: string): string {
   });
 }
 
-// Mirrors Zellij 0.44.x tab minimums, used to predict which pane Zellij itself
-// will choose for a directionless split.
+// Zellij 0.44.x tab minimums, used to predict which pane Zellij picks for a
+// directionless split.
 const ZELLIJ_MIN_TERMINAL_WIDTH = 5;
 const ZELLIJ_MIN_TERMINAL_HEIGHT = 5;
 const ZELLIJ_CURSOR_HEIGHT_WIDTH_RATIO = 4;
 
-// Pi subagents need more usable space than Zellij's internal minimum. These can
-// be tuned per session without another code change.
+// Subagents need more space than Zellij's own minimum; tunable per session.
 const DEFAULT_ZELLIJ_SUBAGENT_MIN_COLUMNS = 50;
 const DEFAULT_ZELLIJ_SUBAGENT_MIN_ROWS = 10;
 
-export interface ZellijPaneSnapshot {
+interface ZellijPaneSnapshot {
   id: number;
   is_plugin?: boolean;
   is_floating?: boolean;
@@ -78,9 +70,9 @@ export interface ZellijPaneSnapshot {
   is_focused?: boolean;
 }
 
-export type ZellijSplitDirection = "down" | "right";
+type ZellijSplitDirection = "down" | "right";
 
-export type ZellijPlacementPlan =
+type ZellijPlacementPlan =
   | {
       mode: "split";
       anchorPaneId: number;
@@ -222,22 +214,24 @@ export function selectZellijPlacement(
     canSplitZellijPane(candidate.pane, minColumns, minRows),
   );
 
-  // Split creation is tab-scoped, so Zellij chooses the concrete split pane.
-  // Only split when every pane Zellij might split would remain usable.
+  // Split creation is tab-scoped, so Zellij picks the concrete pane: only split
+  // when every pane it might pick stays usable.
   if (
     zellijSplitCandidates.length > 0 &&
     safeSplitCandidates.length === zellijSplitCandidates.length
   ) {
-    const splitTarget = safeSplitCandidates.sort(
+    const [splitTarget] = safeSplitCandidates.sort(
       (a, b) => paneArea(b.pane) - paneArea(a.pane),
-    )[0];
-    return {
-      mode: "split",
-      anchorPaneId: splitTarget.pane.id,
-      targetPaneId: splitTarget.pane.id,
-      tabId: tabInfo.tabId,
-      splitDirection: splitTarget.splitDirection,
-    };
+    );
+    if (splitTarget) {
+      return {
+        mode: "split",
+        anchorPaneId: splitTarget.pane.id,
+        targetPaneId: splitTarget.pane.id,
+        tabId: tabInfo.tabId,
+        splitDirection: splitTarget.splitDirection,
+      };
+    }
   }
 
   return selectZellijStackPlacement(panes, parentPaneId);
@@ -340,14 +334,14 @@ function createZellijTab(name: string): string {
     try {
       zellijActionSync(["rename-pane", name], surface);
     } catch {
-      // Optional.
+      // Optional — pane name is cosmetic.
     }
     return surface;
   } catch (error) {
     try {
       zellijActionSync(["close-tab", "--tab-id", String(tabId)]);
     } catch {
-      // Best effort.
+      // Best effort — the tab may already be gone.
     }
     throw error;
   }
@@ -377,11 +371,13 @@ function withZellijSurfaceLock<T>(callback: () => T): T {
 
       try {
         if (Date.now() - statSync(lockPath).mtimeMs > 30000) {
-          // Stale lock — older than 30s means a crashed holder left it behind.
+          // Stale lock: a crashed holder left it behind 30s ago.
           rmSync(lockPath, { recursive: true, force: true });
           continue;
         }
-      } catch {}
+      } catch {
+        // statSync failed: the holder removed the lock between our attempts.
+      }
 
       if (Date.now() > deadline) {
         throw new Error(
@@ -435,9 +431,7 @@ export function createZellijSurface(name: string): string {
   return withZellijSurfaceLock(() => createZellijSurfaceUnlocked(name));
 }
 
-/**
- * Create a new zellij pane (split or new tab) in the given direction.
- */
+/** Split a zellij pane; left/up fall back to the nearest equivalent (right/down). */
 export function createZellijSplitSurface(
   name: string,
   direction: "left" | "right" | "up" | "down",
@@ -463,32 +457,28 @@ export function createZellijSplitSurface(
     rawId = zellijActionSync(args).trim();
   }
 
-  // zellij returns the pane ID as e.g. "terminal_7" — extract the numeric part.
-  // Previously we sent `write-chars "echo $ZELLIJ_PANE_ID"` to a temp file, but
-  // `write-chars` without --pane-id targets the focused pane, which raced on tab switches.
   const surface = parseZellijPaneSurface(rawId, "new-pane");
 
   if (direction === "left" || direction === "up") {
     try {
       zellijActionSync(["move-pane", direction], surface);
     } catch {
-      // Optional layout polish.
+      // Optional placement polish; the pane works wherever zellij put it.
     }
   }
 
   try {
     zellijActionSync(["rename-pane", name], surface);
   } catch {
-    // Optional.
+    // Optional — pane name is cosmetic.
   }
 
   return surface;
 }
 
 export function renameCurrentTab(title: string): void {
-  // zellij: rename the agent's own pane, not the whole tab. In multi-pane layouts,
-  // rename-tab clobbers the user's tab title whenever a subagent starts or /plan runs.
-  // Closes #21.
+  // Rename the agent's own pane, not the tab: rename-tab would clobber the
+  // user's tab title whenever a subagent starts or /plan runs (#21).
   const paneId = process.env.ZELLIJ_PANE_ID;
   if (paneId) {
     zellijActionSync(["rename-pane", title], `pane:${paneId}`);
@@ -498,19 +488,14 @@ export function renameCurrentTab(title: string): void {
 }
 
 export function renameWorkspace(_title: string): void {
-  // Skip session rename for zellij. rename-session renames the socket file
-  // but the ZELLIJ_SESSION_NAME env var in the parent process keeps the old
-  // name, so all subsequent `zellij action ...` CLI calls fail with
-  // "There is no active session!" because the CLI can't find the socket.
-  // Additionally, pi titles often contain special characters (em dashes,
-  // spaces) that fail zellij's session name validation on lookup.
-  // rename-tab (called separately) is sufficient for user-visible naming.
+  // No-op: rename-session renames the socket but leaves ZELLIJ_SESSION_NAME in
+  // the parent stale, so every later `zellij action` fails with "There is no
+  // active session!". rename-pane already covers user-visible naming.
 }
 
 export function sendCommand(surface: string, command: string): void {
   zellijActionSync(["write-chars", command], surface);
-  // zellij "write" takes raw bytes — 13 = Enter (CR), the tmux/herdr
-  // equivalents send the named "Enter" key.
+  // "write" takes raw bytes: 13 = Enter (CR).
   zellijActionSync(["write", "13"], surface);
 }
 

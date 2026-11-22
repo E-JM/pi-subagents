@@ -1,7 +1,7 @@
 // Tiled grid geometry and shared layout primitives (used by herdr and tmux).
 
 /** Default fraction of the tab width reserved for the parent (main agent) pane. */
-export const DEFAULT_SUBAGENT_PARENT_RATIO = 0.4;
+const DEFAULT_SUBAGENT_PARENT_RATIO = 0.4;
 
 export function parentRatioFromEnv(envName: string): number {
   const value = Number(process.env[envName]);
@@ -9,8 +9,6 @@ export function parentRatioFromEnv(envName: string): number {
     ? value
     : DEFAULT_SUBAGENT_PARENT_RATIO;
 }
-
-// --- Tiled grid geometry (shared by herdr and tmux) ---
 
 /** Rectangle in tab/window coordinates. */
 export interface GridRect {
@@ -20,13 +18,8 @@ export interface GridRect {
   height: number;
 }
 
-/**
- * Smallest rectangle covering every input rect. The one bounding fold behind
- * both backends' group regions: callers always seed it with the parent pane's
- * rect, so a solo parent yields exactly its own rect (the whole tab only when
- * nothing else is in it). Input is never empty in practice; the Infinity
- * edges of an empty fold are garbage by contract.
- */
+/** Smallest rectangle covering every input rect. Callers always seed it with
+ * the parent pane's rect, so an empty fold never happens in practice. */
 function boundingRect(rects: GridRect[]): GridRect {
   let left = Infinity;
   let top = Infinity;
@@ -41,16 +34,15 @@ function boundingRect(rects: GridRect[]): GridRect {
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
-export interface GridDims {
+interface GridDims {
   cols: number;
   rows: number;
 }
 
 /**
- * Grid shape for `count` subagents. Rows = round(sqrt(count)), grown one axis
- * at a time: 1×1 → 1×2 → 2×2 → 2×3 → 3×3 → 3×4 → 4×4 … so existing panes
- * never need to change cells when the grid grows (binary split trees can
- * only move dividers, not reflow panes).
+ * Grid shape for `count` subagents. Rows = round(sqrt(count)), grown one axis at
+ * a time: 1×1 → 1×2 → 2×2 → 2×3 → 3×3 …, so existing panes keep their cells
+ * (a binary split tree can move dividers but not reflow panes).
  */
 export function gridDimsForCount(count: number): GridDims {
   const n = Math.max(1, count);
@@ -59,11 +51,7 @@ export function gridDimsForCount(count: number): GridDims {
   return { cols, rows };
 }
 
-/**
- * How the grid grew at exactly `count` (compared to `count - 1`): "col" when
- * a column was added, "row" when a row was added, null when the shape is
- * unchanged (and for count < 2).
- */
+/** Axis the grid grew on at exactly `count`, or null when the shape is unchanged. */
 function gridGrowthAt(count: number): "col" | "row" | null {
   const prev = gridDimsForCount(count - 1);
   const cur = gridDimsForCount(count);
@@ -72,11 +60,7 @@ function gridGrowthAt(count: number): "col" | "row" | null {
   return null;
 }
 
-/**
- * Which axis the grid last grew on at or before `count`: "col" (2,5,10,17…),
- * "row" (3,7,13…), or null when the grid is exactly full. Unclaimed cells
- * left by a growth are absorbed by the neighbor pane on that axis.
- */
+/** Axis the grid last grew on at or before `count`, or null when exactly full. */
 function lastGridGrowth(count: number): "col" | "row" | null {
   for (let n = count; n >= 2; n--) {
     const growth = gridGrowthAt(n);
@@ -100,10 +84,9 @@ function firstFreeCell(
 }
 
 /**
- * Cell (row, col) claimed by each of the first `count` spawns, in order.
- * Every pane keeps its cell as the grid grows: a growth spawn claims the new
- * column's top cell or the new row's left cell; other spawns take the first
- * free cell in scan order.
+ * Cell claimed by each of the first `count` spawns, in order. A growth spawn
+ * takes the new column's top cell or the new row's left cell; every other
+ * spawn takes the first free cell in scan order, so no pane ever moves.
  */
 function spawnSlots(count: number): { row: number; col: number }[] {
   const slots: { row: number; col: number }[] = [];
@@ -127,15 +110,12 @@ function spawnSlots(count: number): { row: number; col: number }[] {
   return slots;
 }
 
-/**
- * Minimum usable cell size for rebalance targets — smaller grids bail out
- * instead of squeezing. (Spawn-time anchor selection uses stricter minimums,
- * since a split must leave both halves usable.)
- */
+/** Smallest usable cell for rebalance targets; smaller areas bail. Spawn-time
+ * anchors are stricter: a split must leave both halves usable. */
 const GRID_MIN_CELL_WIDTH = 10;
 const GRID_MIN_CELL_HEIGHT = 3;
 
-export interface GridTargets {
+interface GridTargets {
   /** Target rect for the parent pane (left strip at `parentRatio`). */
   parentRect: GridRect;
   /** Target cell rect per tracked pane, keyed by pane id (row-major fill). */
@@ -143,12 +123,11 @@ export interface GridTargets {
 }
 
 /**
- * Grid targets: the parent keeps `parentRatio` of `area` width on the left;
- * each tracked pane keeps the cell it was spawned into (spawn order), and —
- * right after a grid growth — absorbs the unclaimed cells beside it (below
- * for new rows, to the right for new columns), matching how the incremental
- * splits actually stretch the neighboring panes. Returns null when the area
- * is too small for usable cells.
+ * Grid targets: the parent keeps `parentRatio` of `area` on the left; each
+ * tracked pane keeps the cell it spawned into, plus the unclaimed cells beside
+ * it right after a growth (below for a new row, right for a new column), which
+ * matches how the incremental splits stretch their neighbors. Null when the
+ * area is too small for usable cells.
  */
 export function planGridTargets(
   paneIds: string[],
@@ -168,7 +147,8 @@ export function planGridTargets(
   const slots = spawnSlots(count);
   const cellOf = new Map<string, { row: number; col: number }>();
   paneIds.forEach((paneId, index) => {
-    cellOf.set(paneId, slots[index]);
+    const slot = slots[index];
+    if (slot) cellOf.set(paneId, slot);
   });
   const growth = lastGridGrowth(count);
   const isUnclaimed = (row: number, col: number): boolean =>
@@ -204,43 +184,43 @@ export function planGridTargets(
 }
 
 /**
- * A pane with its current rect — the input for spawn-anchor selection, both
- * the tiled grid (selectTiledGridAnchor) and the columns rightmost anchor.
+ * How the shared helpers read a backend's pane shape: identity and geometry.
+ * Each backend defines one of these, so call sites pass data instead of lambdas.
  */
+export interface PaneReader<Pane> {
+  idOf: (pane: Pane) => string;
+  rectOf: (pane: Pane) => GridRect;
+}
+
+/** A pane with its current rect, for spawn-anchor selection. */
 interface PlacedPane {
   paneId: string;
   rect: GridRect;
 }
 
 /**
- * Rects of the tracked panes present in `panes`, in tracked (fill) order;
- * tracked panes missing from `panes` are skipped. The single input shaper
- * for spawn-anchor selection in both backends — skipping keeps a stale
- * /reload pane list from wedging the spawn. Exported for tests.
+ * The tracked panes present in `panes`, in tracked (fill) order. Skipping the
+ * missing ones keeps a stale /reload pane list from wedging the spawn. Exported
+ * for tests.
  */
 export function placedPanes<Pane>(
   trackedPaneIds: string[],
   panes: readonly Pane[],
-  paneIdOf: (pane: Pane) => string,
-  rectOf: (pane: Pane) => GridRect,
+  reader: PaneReader<Pane>,
 ): PlacedPane[] {
-  const byId = new Map(panes.map((pane) => [paneIdOf(pane), pane]));
+  const byId = new Map(panes.map((pane) => [reader.idOf(pane), pane]));
   const placed: PlacedPane[] = [];
   for (const id of trackedPaneIds) {
     const pane = byId.get(id);
-    if (pane) placed.push({ paneId: id, rect: rectOf(pane) });
+    if (pane) placed.push({ paneId: id, rect: reader.rectOf(pane) });
   }
   return placed;
 }
 
 /**
- * Columns-mode spawn anchor: the rightmost tracked pane (bottommost, then
- * rightmost, on ties — columns-mode panes are full-height, so the y
- * tie-break only decides odd layouts) at or right of `parentRight` within 1
- * cell. Foreign panes are never anchors — when the tab is shared, the first
- * spawn splits the parent itself rather than carving up a foreign pane.
- * `placed` holds the tracked panes (see placedPanes); null when none
- * qualifies, and callers then split the parent. Exported for tests.
+ * Columns-mode anchor: the rightmost tracked pane (bottommost first on ties) at
+ * or right of `parentRight`. Foreign panes are never anchors, so a shared tab
+ * splits the parent instead. Null means split the parent. Exported for tests.
  */
 export function rightmostAnchor(
   placed: PlacedPane[],
@@ -254,11 +234,9 @@ export function rightmostAnchor(
 }
 
 /**
- * Resolve which pane a new subagent splits, and how: in tiled mode the pane
- * covering the next grid cell (selectTiledGridAnchor over the subagent
- * `area`), in columns mode the rightmost tracked pane (rightmostAnchor) with
- * a plain right split. Null means nothing qualifies — the caller splits the
- * parent itself rather than carving up a foreign pane. Exported for tests.
+ * Which pane a new subagent splits, and how: tiled takes the pane covering the
+ * next grid cell, columns the rightmost tracked pane with a plain right split.
+ * Null means split the parent rather than carving up a foreign pane.
  */
 export function selectSpawnAnchor(
   placed: PlacedPane[],
@@ -275,20 +253,16 @@ export function selectSpawnAnchor(
   return anchor ? { anchorPaneId: anchor, direction: "right" } : null;
 }
 
-export interface TiledAnchorSelection {
+interface TiledAnchorSelection {
   anchorPaneId: string;
   direction: "right" | "down";
 }
 
 /**
- * Pick which tracked pane to split for subagent #count (1-indexed) in tiled
- * mode, and in which direction. `placed` holds the tracked panes with their
- * current rects in fill order; `region` is the subagent area — right of the
- * parent, inside the group region. The anchor is the pane overlapping the
- * target cell the most (ties: smaller pane, then fill order); the direction
- * is whichever half-split of the anchor contains more of the target cell.
- * Returns null when tiling isn't possible and the caller should fall back
- * to columns.
+ * Which tracked pane to split for subagent #count (1-indexed) in tiled mode,
+ * and in which direction. The anchor overlaps the target cell the most (ties:
+ * smaller pane, then fill order); the direction is whichever half contains
+ * more of the cell. Null when tiling is impossible — fall back to columns.
  */
 export function selectTiledGridAnchor(
   placed: PlacedPane[],
@@ -303,7 +277,8 @@ export function selectTiledGridAnchor(
   const cellHeight = region.height / rows;
   if (cellWidth < minCellWidth || cellHeight < minCellHeight) return null;
 
-  const spawnCell = spawnSlots(count)[count - 1];
+  const spawnCell = spawnSlots(count).at(count - 1);
+  if (!spawnCell) return null;
   const target: GridRect = {
     x: region.x + spawnCell.col * cellWidth,
     y: region.y + spawnCell.row * cellHeight,
@@ -353,12 +328,6 @@ export function selectTiledGridAnchor(
   return { anchorPaneId: anchor.paneId, direction };
 }
 
-/**
- * True when `rect` lies fully inside `bounds` within a ±`tolerance`-cell
- * slack. The one containment primitive behind both backends' region checks:
- * herdr passes HERDR_RECT_TOLERANCE (float drift), tmux passes
- * TMUX_RECT_TOLERANCE (integer geometry).
- */
 export function rectWithin(
   rect: GridRect,
   bounds: GridRect,
@@ -373,58 +342,50 @@ export function rectWithin(
 }
 
 /**
- * The region this agent group owns: the bounding rect of the parent pane and
- * its tracked subagent panes present in the layout. When the tab is shared
- * with foreign panes (another agent, user splits), the group only claims the
- * parent's own panel — subagents split within it and rebalancing never moves
- * panes outside it. A solo parent's region is exactly its own rect; in an
- * unshared tab that is the whole tab, so the layout math is unchanged.
+ * The group's region: the bounding rect of the parent and its tracked panes. In
+ * a shared tab that is the parent's own panel, so rebalancing never moves a
+ * foreign pane; in an unshared tab it is the whole tab.
  */
-export function groupRegionOf<P>(
-  panes: P[],
+export function groupRegionOf<Pane>(
+  panes: readonly Pane[],
   parentRect: GridRect,
-  idOf: (pane: P) => string,
-  rectOf: (pane: P) => GridRect,
   trackedPaneIds: string[],
+  reader: PaneReader<Pane>,
 ): GridRect {
   const tracked = new Set(trackedPaneIds);
   return boundingRect([
     parentRect,
-    ...panes.filter((pane) => tracked.has(idOf(pane))).map(rectOf),
+    ...panes
+      .filter((pane) => tracked.has(reader.idOf(pane)))
+      .map((pane) => reader.rectOf(pane)),
   ]);
 }
 
 /**
- * One bail decision for both grid planners: a foreign pane right of the
- * parent inside the group's region (a user split in the grid area) would get
- * wrecked by the rebalance — bail the whole plan. Foreign panes elsewhere
- * are not ours to care about.
+ * True when a foreign pane sits right of the parent inside the group region: the
+ * rebalance would wreck it, so both grid planners bail on the whole plan.
  */
-export function foreignPaneInGridArea<P>(
-  panes: P[],
-  parentPaneId: string,
-  trackedPaneIds: string[],
-  region: GridRect,
-  parentRight: number,
-  idOf: (pane: P) => string,
-  leftOf: (pane: P) => number,
-  inRegion: (pane: P) => boolean,
-): boolean {
+export function foreignPaneInGridArea<Pane>(options: {
+  panes: readonly Pane[];
+  parentPaneId: string;
+  trackedPaneIds: string[];
+  parentRight: number;
+  inRegion: (pane: Pane) => boolean;
+  reader: PaneReader<Pane>;
+}): boolean {
+  const { panes, parentPaneId, trackedPaneIds, parentRight, inRegion, reader } =
+    options;
   const tracked = new Set(trackedPaneIds);
   return panes.some(
     (pane) =>
-      idOf(pane) !== parentPaneId &&
-      !tracked.has(idOf(pane)) &&
+      reader.idOf(pane) !== parentPaneId &&
+      !tracked.has(reader.idOf(pane)) &&
       inRegion(pane) &&
-      leftOf(pane) >= parentRight - 1,
+      reader.rectOf(pane).x >= parentRight - 1,
   );
 }
 
-/**
- * The subagent area a tiled spawn carves from: the group region minus the
- * parent strip — right of the parent, within the group's own region, so a
- * shared-tab spawn never reaches into foreign panes.
- */
+/** The group region minus the parent strip: where a tiled spawn carves. */
 export function subagentArea(group: GridRect, parentRight: number): GridRect {
   return {
     x: parentRight,

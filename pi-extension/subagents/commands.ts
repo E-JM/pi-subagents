@@ -1,24 +1,21 @@
-// Slash commands: /iterate, /subagent, /subagent-layout, /plan.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  DynamicBorder,
   type ExtensionAPI,
   type ExtensionUIContext,
-  DynamicBorder,
   getSelectListTheme,
 } from "@mariozechner/pi-coding-agent";
 import { Container, type SelectItem, SelectList } from "@mariozechner/pi-tui";
 import { loadAgentDefaults } from "./agents.ts";
+import { SUBAGENTS_DIR } from "./files.ts";
+import { renameCurrentTab, renameWorkspace } from "./mux/api.ts";
+import { getMuxBackend, isMuxAvailable } from "./mux/backend.ts";
 import {
-  getMuxBackend,
   getSubagentLayoutMode,
-  isMuxAvailable,
-  renameCurrentTab,
-  renameWorkspace,
   type SubagentLayoutMode,
   setSubagentLayoutMode,
-} from "./cmux.ts";
-import { SUBAGENTS_DIR } from "./util.ts";
+} from "./mux/layout-mode.ts";
 
 const SUBAGENT_LAYOUT_ITEMS: SelectItem[] = [
   {
@@ -33,10 +30,7 @@ const SUBAGENT_LAYOUT_ITEMS: SelectItem[] = [
   },
 ];
 
-/**
- * Interactive layout picker, mirroring the built-in /thinking selector:
- * bordered SelectList, current mode preselected, Esc cancels.
- */
+/** Layout picker mirroring the built-in /thinking selector; Esc cancels. */
 async function selectSubagentLayout(
   ui: ExtensionUIContext,
   current: SubagentLayoutMode,
@@ -107,7 +101,8 @@ export function registerSubagentCommands(pi: ExtensionAPI): void {
 
       const taskText =
         task || `You are the ${agentName} agent. Wait for instructions.`;
-      const displayName = agentName[0].toUpperCase() + agentName.slice(1);
+      const displayName =
+        agentName.charAt(0).toUpperCase() + agentName.slice(1);
       const toolCall = `Use subagent_spawn with agent: "${agentName}", name: "${displayName}", task: ${JSON.stringify(taskText)}`;
       pi.sendUserMessage(toolCall);
     },
@@ -133,7 +128,7 @@ export function registerSubagentCommands(pi: ExtensionAPI): void {
         arg === "columns" || arg === "tiled"
           ? arg
           : await selectSubagentLayout(ctx.ui, current);
-      if (!next) return; // picker canceled
+      if (!next) return;
       setSubagentLayoutMode(next);
       const backend = getMuxBackend();
       const note =
@@ -162,7 +157,7 @@ export function registerSubagentCommands(pi: ExtensionAPI): void {
           renameWorkspace(`🎯 ${label}`);
           renameCurrentTab(`🎯 Plan: ${label}`);
         } catch {
-          // non-critical -- do not block the plan
+          // Non-critical — cosmetic tab renames must not block the plan.
         }
       }
 

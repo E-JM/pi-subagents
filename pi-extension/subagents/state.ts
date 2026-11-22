@@ -1,23 +1,29 @@
-// Shared runtime state: /reload-surviving symbol-keyed store, interval
-// handles, the running-subagent registry, and shared status config.
+// Shared runtime state that survives /reload: timers, registry, status config.
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { loadStatusConfig, type SubagentStatusState } from "./status.ts";
+import { loadStatusConfig } from "./status/config.ts";
+import type { SubagentStatusState } from "./status/snapshot.ts";
 
-// Survive /reload: closures from the previous module load keep running, so
-// clear its timers and abort its poll loops (otherwise /reload leaves
-// duplicate intervals and pollers behind).
+// Closures from the previous module load keep running after /reload, so their
+// timers and pollers must be cleared or they pile up.
 export const WIDGET_INTERVAL_KEY = Symbol.for("pi-subagents/widget-interval");
 export const STATUS_INTERVAL_KEY = Symbol.for("pi-subagents/status-interval");
-export const POLL_ABORT_KEY = Symbol.for("pi-subagents/poll-abort-controller");
+const POLL_ABORT_KEY = Symbol.for("pi-subagents/poll-abort-controller");
 
 /** Symbol-keyed store for state that must survive /reload. */
 export const globalStore = globalThis as Record<symbol, unknown>;
 
-{
+teardownModuleTimers();
+
+/**
+ * Stop timers and poll loops left by the current module load, then re-arm the
+ * abort controller. Runs at load and on session_shutdown.
+ */
+export function teardownModuleTimers(): void {
   clearStoredInterval(WIDGET_INTERVAL_KEY);
   clearStoredInterval(STATUS_INTERVAL_KEY);
   const prevAbort = globalStore[POLL_ABORT_KEY] as AbortController | undefined;
   if (prevAbort) prevAbort.abort();
+  // Re-arm so a cached module never inherits an aborted signal.
   globalStore[POLL_ABORT_KEY] = new AbortController();
 }
 
@@ -25,11 +31,7 @@ export function getModuleAbortSignal(): AbortSignal {
   return (globalStore[POLL_ABORT_KEY] as AbortController).signal;
 }
 
-/**
- * The symbol-keyed globalStore slots are the single home for the interval
- * handles: closures from an older module load still see the same slots, so
- * /reload teardown and runtime teardown both act on the same timer.
- */
+/** Interval handles live in the symbol-keyed store so /reload teardown reaches them. */
 export function getStoredInterval(key: symbol): IntervalHandle | null {
   return (globalStore[key] as IntervalHandle | null | undefined) ?? null;
 }
@@ -42,27 +44,21 @@ export function clearStoredInterval(key: symbol): void {
   }
 }
 
-export type IntervalHandle = ReturnType<typeof setInterval>;
+type IntervalHandle = ReturnType<typeof setInterval>;
 
-/**
- * Result from running a single subagent.
- */
 export interface SubagentResult {
   name: string;
   task: string;
   summary: string;
   sessionFile?: string;
-  /** Filename (not a bare session id) of the copied Claude transcript under CLAUDE_SESSIONS_DIR. */
+  /** Copied Claude transcript filename under CLAUDE_SESSIONS_DIR. */
   claudeSessionId?: string;
   exitCode: number;
   elapsed: number;
-  /** Provider/agent error message when auto-retry exhausted (overload, rate limit, etc.). */
+  /** Provider/agent error after retries were exhausted. */
   errorMessage?: string;
 }
 
-/**
- * State for a launched (but not yet completed) subagent.
- */
 export interface RunningSubagent {
   id: string;
   name: string;
@@ -79,27 +75,61 @@ export interface RunningSubagent {
   statusState: SubagentStatusState;
   /** Set when the launch fell back from the agent's model (no credentials). */
   modelWarning?: string;
-  /**
-   * When true, the pane never wakes the parent session — not on status
-   * transitions, not on idleness (there is no idle lifeline). The user
-   * drives the conversation in the subagent's pane (e.g. planner), and only
-   * the user closes it (directly, or by asking the parent for subagent_close).
-   */
+  /** Pane never wakes the parent (no status/idle lifeline); only the user closes it. */
   interactive: boolean;
 }
 
-/** All currently running subagents, keyed by id. */
-export const runningSubagents = new Map<string, RunningSubagent>();
-
 /**
- * Session files claimed by an in-flight resume (claimed synchronously
- * before the async launch, released once the run registers or the resume
- * fails): closes the check-then-act window parallel subagent_message calls
- * would otherwise race through.
+ * Owns live runs and resume claims; all mutation goes through it. Module-level
+ * on purpose: /reload re-executes the module and gets a fresh registry.
  */
-export const claimedResumeSessions = new Set<string>();
+class SubagentRegistry {
+  readonly #runs = new Map<string, RunningSubagent>();
+  readonly #resumeClaims = new Set<string>();
 
-/** Latest ExtensionContext from session_start, used for widget updates. */
+  /** Snapshot of live runs in insertion order. */
+  all(): RunningSubagent[] {
+    return [...this.#runs.values()];
+  }
+
+  get(id: string): RunningSubagent | undefined {
+    return this.#runs.get(id);
+  }
+
+  register(running: RunningSubagent): void {
+    this.#runs.set(running.id, running);
+  }
+
+  unregister(id: string): void {
+    this.#runs.delete(id);
+  }
+
+  isEmpty(): boolean {
+    return this.#runs.size === 0;
+  }
+
+  /** Drop all runs and claims; aborting runs is the caller's job. */
+  clear(): void {
+    this.#runs.clear();
+    this.#resumeClaims.clear();
+  }
+
+  /** Take an exclusive resume claim; false when one already exists. */
+  tryClaimResume(sessionPath: string): boolean {
+    if (this.#resumeClaims.has(sessionPath)) return false;
+    this.#resumeClaims.add(sessionPath);
+    return true;
+  }
+
+  releaseResumeClaim(sessionPath: string): void {
+    this.#resumeClaims.delete(sessionPath);
+  }
+}
+
+/** Registry for this module load. */
+export const registry = new SubagentRegistry();
+
+/** Context from session_start, used for widget updates. */
 let latestCtx: ExtensionContext | null = null;
 
 export function setLatestContext(ctx: ExtensionContext | null): void {

@@ -1,14 +1,21 @@
 {
-	"compilerOptions": {
-		"target": "esnext",
-		"module": "nodenext",
-		"moduleResolution": "nodenext",
-		"allowImportingTsExtensions": true,
-		"verbatimModuleSyntax": true,
-		"noEmit": true,
-		"skipLibCheck": true,
-		"strict": true,
-		"types": ["node"]
-	},
-	"include": ["pi-extension/**/*.ts", "test/**/*.ts"]
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
+  },
+  "include": ["pi-extension/**/*.ts", "test/**/*.ts"]
 }

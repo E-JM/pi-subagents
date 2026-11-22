@@ -1,5 +1,3 @@
-// Terminal-multiplexer backend detection and selection.
-
 import { execFileSync, execSync } from "node:child_process";
 
 export type MuxBackend = "cmux" | "tmux" | "zellij" | "wezterm" | "herdr";
@@ -69,18 +67,6 @@ function isHerdrRuntimeAvailable(): boolean {
   const insideHerdr =
     process.env.HERDR_ENV === "1" || process.env.TERM_PROGRAM === "herdr";
   return insideHerdr && !!process.env.HERDR_PANE_ID && hasCommand("herdr");
-}
-
-export function isCmuxAvailable(): boolean {
-  return isCmuxRuntimeAvailable();
-}
-
-export function isWezTermAvailable(): boolean {
-  return isWezTermRuntimeAvailable();
-}
-
-export function isHerdrAvailable(): boolean {
-  return isHerdrRuntimeAvailable();
 }
 
 export function getMuxBackend(): MuxBackend | null {

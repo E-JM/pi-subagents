@@ -1,5 +1,3 @@
-// WezTerm backend: thin CLI wrappers around pane ops.
-
 import { execFileSync } from "node:child_process";
 
 export function createWeztermSurface(name: string): string {
@@ -7,9 +5,6 @@ export function createWeztermSurface(name: string): string {
   return createWeztermSplitSurface(name, "right", process.env.WEZTERM_PANE);
 }
 
-/**
- * Create a new wezterm pane (split) in the given direction.
- */
 export function createWeztermSplitSurface(
   name: string,
   direction: "left" | "right" | "up" | "down",

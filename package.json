@@ -11,18 +11,29 @@
     "type": "git",
     "url": "https://github.com/E-JM/pi-subagent"
   },
+  "engines": {
+    "node": ">=20.6.0"
+  },
   "type": "module",
   "scripts": {
-    "test": "node --test test/test.ts",
+    "test": "node --test test/*.test.ts",
     "test:integration": "node --test --test-concurrency=1 test/integration/*.test.ts",
     "format": "biome format --write .",
-    "format:check": "biome format ."
+    "format:check": "biome format .",
+    "lint": "biome check .",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "*"
   },
+  "files": [
+    "pi-extension",
+    "agents",
+    "config.json.example"
+  ],
   "pi": {
     "extensions": [
       "./pi-extension/subagents/index.ts"
@@ -30,9 +41,10 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.8",
-    "@mariozechner/pi-coding-agent": "^0.65.0",
-    "@mariozechner/pi-tui": "^0.65.0",
+    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "@mariozechner/pi-tui": "^0.73.1",
     "@sinclair/typebox": "^0.34.49",
-    "@types/node": "^26.6.6"
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
   }
 }

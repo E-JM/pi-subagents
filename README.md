@@ -21,10 +21,12 @@
 - [Role Folders](#role-folders)
 - [Tools Widget](#tools-widget)
 - [Configuration](#configuration)
+- [Project structure](#project-structure)
 
 ## Requirements
 
 - [pi](https://github.com/badlogic/pi-mono) — the coding agent
+- Node.js ≥ 20.6 (what pi runs on). Working on the extension itself needs ≥ 23.6, because the sources and tests are `.ts` files executed directly by Node's type stripping — there is no build step and no emitted JS.
 - One supported multiplexer: [cmux](https://github.com/manaflow-ai/cmux), [tmux](https://github.com/tmux/tmux), [zellij](https://zellij.dev), [WezTerm](https://wezfurlong.org/wezterm/), or [herdr](https://herdr.dev)
 
 ## Install
@@ -443,6 +445,57 @@ Other pane behavior:
 - Because herdr's `pane read` cannot see the transcript of fullscreen (alt-screen) background panes, Pi-backed subagents on herdr launch with `--tui-mode regular` so their output stays readable for completion detection.
 
 cmux, zellij, and WezTerm keep their own layout behavior regardless of these settings.
+
+## Project structure
+
+The extension is layered so each module has one reason to change. `index.ts` composes the extension; `tools/` is the interface layer (tool registration and parameter parsing) and delegates to use cases.
+
+```text
+pi-extension/subagents/
+  index.ts            composition root — registers tools, commands, renderers
+  tools/              one module per tool capability
+    shared.ts           the "no multiplexer" result
+    spawn.ts            subagent_spawn — guards, launch, started result
+    message.ts          subagent_message — live delivery and resume
+    close.ts            subagent_close
+  launch/             spawn pipeline, split by layer
+    schema.ts           typebox parameters
+    policies.ts         pure domain rules (model fallback, depth, delivery)
+    command-builder.ts  argv/env/system prompt for pi and claude
+    spawn.ts            spawn use case
+  resume.ts           resume use case
+  targeting.ts        live-target matching and formatting
+  lifecycle.ts        watch pipeline, supervision loop, close path
+  delivery.ts         result/ask presentation to the parent
+  ui/                 output paths
+    widget.ts           status widget: borders, rows, refresh loop
+    renderers.ts        subagent_result/status/ask message renderers
+  status/             parent-side run status
+    config.ts           config.json parsing
+    snapshot.ts         observation -> snapshot state machine
+    format.ts           status and transition lines
+  activity/           child-written activity snapshots
+    schema.ts           event/phase/scope vocabulary and snapshot shape
+    read.ts             parent side: validate a snapshot
+    recorder.ts         child side: throttled writes and heartbeat
+  child.ts            extension loaded into the child session
+    protocol.ts         pure turn-end contract
+  agents.ts           agent definitions (frontmatter, discovery)
+  session.ts          session seeding and summary extraction
+  exit-poll.ts        .exit/.ask sidecars and the screen sentinel
+  sanitize.ts         text guards for child-controlled output
+  state.ts            reload-surviving store + running-subagent registry
+  mux/                multiplexer backends behind one normalized API
+    api.ts              per-backend dispatch
+    layout-grid.ts      shared grid/region geometry
+    layout-mode.ts      columns vs tiled
+    tracked-panes.ts    per-backend subagent pane list
+    <backend>.ts        cmux, zellij, wezterm
+    herdr|tmux/         layout.ts (pure planning) + ops.ts (pane ops)
+  format.ts files.ts random.ts guards.ts shell.ts   shared primitives
+```
+
+`npm run check` is the gate CI runs: format check, lint, typecheck, unit tests. `npm run test:integration` additionally exercises real pane lifecycles and needs a supported multiplexer.
 
 ## Acknowledgements
 

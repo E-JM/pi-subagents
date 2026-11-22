@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 
 interface SessionEntry {
   type: string;
@@ -20,13 +20,9 @@ interface MessageEntry extends SessionEntry {
 export type SeededSubagentSessionMode = "lineage-only" | "fork";
 
 /**
- * History lines seeded into a forked child session.
- *
- * Two rules: (1) the seeded history is truncated BEFORE (excluding) the
- * parent's most recent user message — the child must not see its own task
- * twice, since the task is delivered separately as the child's first prompt;
- * (2) prior `session` header lines are stripped because the child writes its
- * own header (seedSubagentSessionFile prepends it).
+ * History lines seeded into a forked child session: truncated before the
+ * parent's latest user message (the child gets the task as its first prompt
+ * instead), with prior `session` headers stripped so the child writes its own.
  */
 function getForkContentLines(parentSessionFile: string): string[] {
   const raw = readFileSync(parentSessionFile, "utf8");
@@ -34,8 +30,10 @@ function getForkContentLines(parentSessionFile: string): string[] {
 
   let truncateAt = lines.length;
   for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line) continue;
     try {
-      const entry = JSON.parse(lines[i]);
+      const entry = JSON.parse(line);
       if (entry.type === "message" && entry.message?.role === "user") {
         truncateAt = i;
         break;
@@ -54,6 +52,10 @@ function getForkContentLines(parentSessionFile: string): string[] {
   });
 }
 
+/**
+ * Pre-create the child's session file: header (with parent link) plus forked
+ * entries, so the watcher can read before the child's first write.
+ */
 export function seedSubagentSessionFile(params: {
   mode: SeededSubagentSessionMode;
   parentSessionFile: string;
@@ -116,19 +118,16 @@ function assistantErrorText(msg: MessageEntry): string | null {
 }
 
 /**
- * Find the last assistant message text in a list of entries.
- *
- * Falls back to the `errorMessage` field when the last assistant message has
- * `stopReason: "error"` and no usable text content — this happens when
- * auto-retry exhausts on a provider overload / rate limit / server error, and
- * without this fallback the parent would silently see a stale earlier message.
+ * Find the last assistant message text, falling back to `errorMessage` when that
+ * message is a `stopReason: "error"` turn with no usable text — otherwise the
+ * parent would be handed a stale earlier message.
  */
 export function findLastAssistantMessage(
   entries: SessionEntry[],
 ): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
-    if (entry.type !== "message") continue;
+    if (entry?.type !== "message") continue;
     const msg = entry as MessageEntry;
     if (msg.message.role !== "assistant") continue;
 
@@ -139,19 +138,4 @@ export function findLastAssistantMessage(
     if (error) return error;
   }
   return null;
-}
-
-/**
- * Return the index of the last assistant message entry, or -1 when the
- * session has none. The waiting-delivery lane uses it as its growth guard:
- * a re-delivery is only allowed when a NEW assistant message exists (growth
- * from user entries alone must not re-steer the previous closing text).
- */
-export function findLastAssistantIndex(entries: SessionEntry[]): number {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
-    if (entry.type !== "message") continue;
-    if ((entry as MessageEntry).message?.role === "assistant") return i;
-  }
-  return -1;
 }

@@ -1,7 +1,6 @@
-// cmux backend: focus snapshots, surface/split creation, and pane ops.
-
 import { execFileSync, execSync, spawnSync } from "node:child_process";
-import { shellEscape, sleepSync } from "./util.ts";
+import { shellEscape } from "../shell.ts";
+import { parseCliJson, sleepSync } from "./cli.ts";
 
 /** Tracked subagent pane for cmux — reused across subagent launches. */
 let cmuxSubagentPane: string | null = null;
@@ -25,10 +24,7 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-/**
- * Read `{ [key]: { surface_ref?, pane_ref? } }` from a parsed cmux identify
- * payload, rejecting entries without at least one usable ref.
- */
+/** One cmux identify ref pair, or null when no usable ref is present. */
 function parseCmuxFocusSnapshotField(
   value: unknown,
   key: "focused" | "caller",
@@ -54,18 +50,10 @@ export function parseCmuxFocusedSnapshot(
   return parseCmuxFocusSnapshotField(value, "focused");
 }
 
-export function parseCmuxJson(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
 export function parseCmuxFocusedSnapshotFromJson(
   value: string,
 ): CmuxFocusSnapshot | null {
-  return parseCmuxFocusedSnapshot(parseCmuxJson(value));
+  return parseCmuxFocusedSnapshot(parseCliJson(value));
 }
 
 function parseCmuxCallerSnapshot(value: unknown): CmuxFocusSnapshot | null {
@@ -94,7 +82,6 @@ export function parseCmuxPaneRefForSurface(
   );
 }
 
-/** The pane ref when `record` is for `surface` and carries a non-empty pane_ref. */
 function paneRefForSurface(
   record: { surface_ref?: unknown; pane_ref?: unknown },
   surface: string,
@@ -108,7 +95,7 @@ export function parseCmuxPaneRefForSurfaceFromJson(
   value: string,
   surface: string,
 ): string | null {
-  return parseCmuxPaneRefForSurface(parseCmuxJson(value), surface);
+  return parseCmuxPaneRefForSurface(parseCliJson(value), surface);
 }
 
 function readCmux(args: string[]): string | null {
@@ -118,7 +105,7 @@ function readCmux(args: string[]): string | null {
 }
 
 function parseCmuxIdentifySnapshot(value: string | null): CmuxIdentifySnapshot {
-  const parsed = value ? parseCmuxJson(value) : null;
+  const parsed = value ? parseCliJson(value) : null;
   return {
     focused: parseCmuxFocusedSnapshot(parsed),
     caller: parseCmuxCallerSnapshot(parsed),
@@ -127,10 +114,6 @@ function parseCmuxIdentifySnapshot(value: string | null): CmuxIdentifySnapshot {
 
 function captureCmuxIdentifySnapshot(): CmuxIdentifySnapshot {
   return parseCmuxIdentifySnapshot(readCmux(["identify", "--json"]));
-}
-
-function captureCmuxFocusSnapshot(): CmuxFocusSnapshot | null {
-  return captureCmuxIdentifySnapshot().focused;
 }
 
 function readCmuxPaneRefForSurface(surface: string): string | null {
@@ -193,7 +176,7 @@ function restoreCmuxFocusIfLaunchSurfaceFocused(
   if (!snapshot) return;
 
   waitForCmuxFocusSettle();
-  const currentFocus = captureCmuxFocusSnapshot();
+  const currentFocus = captureCmuxIdentifySnapshot().focused;
   if (
     cmuxFocusMatchesChild(currentFocus, child) ||
     cmuxFocusMatchesSurfaceRef(currentFocus, options?.sourceSurfaceRef) ||
@@ -201,7 +184,8 @@ function restoreCmuxFocusIfLaunchSurfaceFocused(
       currentFocus,
       options?.callerSnapshot?.surfaceRef,
     ) ||
-    // cmux can settle focus onto another active surface in the caller pane after creating a split/surface.
+    // cmux can settle focus onto another surface in the caller pane after a
+    // split/surface.
     cmuxFocusMatchesPaneRef(currentFocus, options?.callerSnapshot?.paneRef)
   ) {
     restoreCmuxFocusSnapshot(snapshot);
@@ -260,9 +244,7 @@ export function createCmuxSplitSurface(
   }
 }
 
-/**
- * Create a new surface (tab) in an existing cmux pane.
- */
+/** New surface (tab) in an existing cmux pane. */
 function createSurfaceInPane(name: string, pane: string): string {
   const identifySnapshot = captureCmuxIdentifySnapshot();
   const focusSnapshot = identifySnapshot.focused;
@@ -288,10 +270,7 @@ function createSurfaceInPane(name: string, pane: string): string {
   }
 }
 
-/**
- * Create a cmux surface for a subagent: reuse the tracked split pane (new
- * tab within it) while it exists, otherwise create a fresh right split.
- */
+/** Reuse the tracked split pane (new tab in it) while it exists, else split right. */
 export function createCmuxSubagentSurface(name: string): string {
   if (cmuxSubagentPane) {
     try {
@@ -299,8 +278,9 @@ export function createCmuxSubagentSurface(name: string): string {
       if (tree.includes(cmuxSubagentPane)) {
         return createSurfaceInPane(name, cmuxSubagentPane);
       }
-    } catch {}
-    // Pane is gone — fall through to create a new split
+    } catch {
+      // `cmux tree` failed: treat the pane as gone and split a new one.
+    }
     cmuxSubagentPane = null;
   }
 

@@ -1,42 +1,23 @@
-/**
- * Exit-polling for a running subagent pane: the `.exit` sidecar protocol
- * (written by the child's child.ts extension) with a screen-sentinel
- * fallback for crash detection, plus the non-terminal `.ask` sidecar that
- * surfaces ask_question payloads to the parent while the child keeps
- * running.
- */
-import { execFile } from "node:child_process";
+// Exit polling via the `.exit` sidecar, screen-sentinel crash fallback, and `.ask` questions.
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { promisify } from "node:util";
-import { getMuxBackend, isHerdrAgentWorking, readScreenAsync } from "./cmux.ts";
-
-const execFileAsync = promisify(execFile);
+import { isPlainObject } from "./guards.ts";
+import { readScreenAsync } from "./mux/api.ts";
+import { getMuxBackend } from "./mux/backend.ts";
+import { isHerdrAgentWorking, waitHerdrAgentSettled } from "./mux/herdr/ops.ts";
 
 export interface PollResult {
-  /** How the subagent exited */
   reason: "done" | "sentinel" | "error";
-  /** Shell exit code (from sentinel). 0 for file-based exits. */
+  /** Shell exit code from the sentinel; 0 for file-based exits. */
   exitCode: number;
-  /** Error message if reason is "error" (auto-retry exhausted, provider overload, etc.) */
   errorMessage?: string;
 }
 
-/** An ask_question payload written by the child's `.ask` sidecar. */
 export interface AskPayload {
   name: string;
   message: string;
 }
 
-/** Shape of the `.exit` sidecar JSON written by the child extension. */
-interface ExitSidecarPayload {
-  type?: unknown;
-  errorMessage?: unknown;
-}
-
-/**
- * Read + consume the `.exit` sidecar for a session file. Returns the decoded
- * PollResult, or null when the sidecar does not exist / is not yet readable.
- */
+/** Read and consume the `.exit` sidecar; null if absent or unreadable. */
 function readExitSidecar(sessionFile: string): PollResult | null {
   const exitFile = `${sessionFile}.exit`;
   try {
@@ -49,15 +30,9 @@ function readExitSidecar(sessionFile: string): PollResult | null {
   }
 }
 
-/**
- * Interpret an `.exit` sidecar payload (written by the child extension on
- * turn-end auto-exit). Centralized so both the fast and slow paths in
- * pollForExit decode the payload the same way.
- */
+// One decoder so the fast and slow poll paths agree.
 function interpretExitSidecar(data: unknown): PollResult {
-  const payload = (
-    typeof data === "object" && data !== null ? data : {}
-  ) as ExitSidecarPayload;
+  const payload = isPlainObject(data) ? data : {};
 
   if (payload.type === "error") {
     const errorMessage =
@@ -70,12 +45,7 @@ function interpretExitSidecar(data: unknown): PollResult {
   return { reason: "done", exitCode: 0 };
 }
 
-/**
- * Read + consume the non-terminal `.ask` sidecar for a session file.
- * Returns the ask payload, or null when the sidecar does not exist / is not
- * yet readable. Consuming (deleting) the file is what makes it a one-shot
- * channel — the child writes a fresh file per ask_question call.
- */
+// Consuming (deleting) the file is what makes `.ask` a one-shot channel.
 function readAskSidecar(sessionFile: string): AskPayload | null {
   const askFile = `${sessionFile}.ask`;
   if (!existsSync(askFile)) return null;
@@ -83,13 +53,10 @@ function readAskSidecar(sessionFile: string): AskPayload | null {
   try {
     data = JSON.parse(readFileSync(askFile, "utf8"));
   } catch (error) {
-    // Consumed between the existsSync probe and this read (e.g. the resume
-    // path's stale-sidecar cleanup): not corrupt, nothing to deliver.
+    // Consumed between the existsSync probe and this read: nothing to deliver.
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    // Corrupt sidecar (killed mid-write): unlink it so this tick cannot
-    // become a permanent poison pill, and surface a synthetic ask so the
-    // failure is visible instead of the question silently vanishing while
-    // the child sits in awaiting-reply forever.
+    // Corrupt (killed mid-write): unlink so it cannot poison every tick, and
+    // surface a synthetic ask.
     rmSync(askFile, { force: true });
     return {
       name: "subagent",
@@ -98,26 +65,19 @@ function readAskSidecar(sessionFile: string): AskPayload | null {
     };
   }
   rmSync(askFile, { force: true });
-  const payload = (typeof data === "object" && data !== null ? data : {}) as {
-    name?: unknown;
-    message?: unknown;
-  };
+  const payload = isPlainObject(data) ? data : {};
   return {
     name: typeof payload.name === "string" ? payload.name : "subagent",
     message: typeof payload.message === "string" ? payload.message : "",
   };
 }
 
-/**
- * Match the screen sentinel the launch command echoes on completion. The
- * echo emits the sentinel as a whole line (a fresh shell prompt follows on
- * the next line), so only a full-line match counts: a literal riding along
- * mid-text — pasted into the pane, printed by a subagent's bash output —
- * must not read as completion.
- */
+// The echo emits the sentinel as a whole line, so only a full-line match counts:
+// a literal pasted mid-text must not read as completion.
 export function matchScreenSentinel(screen: string): number | null {
   const match = screen.match(/^[ \t]*__SUBAGENT_DONE_(\d+)__[ \t\r]*$/m);
-  return match ? Number.parseInt(match[1], 10) : null;
+  const code = match?.[1];
+  return code ? Number.parseInt(code, 10) : null;
 }
 
 export const __pollForExitTest__ = {
@@ -126,12 +86,8 @@ export const __pollForExitTest__ = {
   matchScreenSentinel,
 };
 
-/**
- * Poll until the subagent exits. Checks for a `.exit` sidecar file first
- * (written on turn-end auto-exit), falling back to the terminal sentinel for
- * crash detection. A `.ask` sidecar is consumed non-terminally: pollForExit
- * calls options.onAsk with the payload and keeps polling.
- */
+// Poll until exit: `.exit` sidecar first, then the screen sentinel for crashes.
+// `.ask` is consumed non-terminally via onAsk.
 export async function pollForExit(
   surface: string,
   signal: AbortSignal,
@@ -168,7 +124,9 @@ export async function pollForExit(
         if (existsSync(options.sentinelFile)) {
           return { reason: "sentinel", exitCode: 0 };
         }
-      } catch {}
+      } catch {
+        // Unreadable sentinel path: fall through to the screen check.
+      }
     }
 
     // Slow path: read terminal screen for sentinel (crash detection)
@@ -192,44 +150,7 @@ export async function pollForExit(
     // herdr: block on `agent wait` instead of blind sampling — it returns as
     // soon as the agent settles (idle/blocked/gone), avoiding a hot loop.
     if (getMuxBackend() === "herdr" && (await isHerdrAgentWorking(surface))) {
-      const wait = execFileAsync(
-        "herdr",
-        [
-          "agent",
-          "wait",
-          surface,
-          "--until",
-          "idle",
-          "--until",
-          "blocked",
-          "--until",
-          "unknown",
-          "--timeout",
-          String(options.interval),
-        ],
-        { encoding: "utf8" },
-      );
-      const abort = new Promise<never>((_, reject) => {
-        if (signal.aborted) {
-          wait.child?.kill();
-          return reject(new Error("Aborted"));
-        }
-        signal.addEventListener(
-          "abort",
-          () => {
-            wait.child?.kill();
-            reject(new Error("Aborted"));
-          },
-          { once: true },
-        );
-      });
-      await Promise.race([
-        wait.then(
-          () => undefined,
-          () => undefined,
-        ),
-        abort,
-      ]);
+      await waitHerdrAgentSettled(surface, options.interval, signal);
       continue;
     }
 
